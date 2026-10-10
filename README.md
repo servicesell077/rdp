@@ -1,105 +1,66 @@
-# Secure RDP Access to GitHub Actions Runners via Tailscale
+# RDP Windows via GitHub Actions + Tailscale
 
-# ⚠️ Caution ⚠️
-## Don't use your main github account 
+Un bureau Windows complet, accessible à la demande en Bureau à distance (RDP), sur un runner GitHub Actions. Le port RDP n'est **jamais** exposé sur Internet : tout passe par votre réseau privé Tailscale.
 
-This repository contains a GitHub Actions workflow that provides secure, on-demand Remote Desktop Protocol (RDP) access to a GitHub-hosted Windows runner.
+> **Utilisez un dépôt privé** (ou au minimum un compte GitHub dédié). Les journaux d'un dépôt public sont lisibles par tout le monde (IP Tailscale, nom d'utilisateur).
 
-Instead of exposing the RDP port to the public internet, this workflow uses [Tailscale](https://tailscale.com/) to create a secure, private overlay network. This allows you to connect directly to the runner from your local machine as if it were on the same local network, without complex firewall configurations or the security risks of a public IP.
+## Ce qui a été corrigé par rapport à la version d'origine
 
-## Features
+| Problème | Correction |
+|---|---|
+| **RDP qui tombe après 1 à 2 h** | Tailscale est lancé avec `--unattended` : le tunnel reste actif même sans session Windows ouverte. |
+| Sessions coupées par Windows | Plus aucune limite d'inactivité, de déconnexion ou de durée de session ; keep-alive RDP activé ; veille, hibernation et verrouillage d'écran désactivés. |
+| Service RDP qui peut s'arrêter | Redémarrage automatique du service (`sc failure`) + surveillance toutes les 30 s. |
+| Tunnel Tailscale qui peut tomber | La boucle de maintien détecte un tunnel hors ligne et le reconnecte toute seule. |
+| `timeout-minutes: 3600` | Valeur invalide : GitHub limite les runners hébergés à 360 min (6 h). Remplacée par `360`, avec une durée de session réglable. |
+| Mot de passe affiché dans les logs et écrit dans `GITHUB_ENV` | Supprimé : le mot de passe n'est jamais affiché ni exporté. |
+| NLA et couche de sécurité désactivés | NLA + TLS activés. |
+| Port 3389 ouvert à tout le monde | Autorisé uniquement depuis `100.64.0.0/10` (réseau Tailscale). |
+| Tailscale 1.82.0 figé | Dernière version stable téléchargée automatiquement, avec nouvelles tentatives. |
+| Machine qui reste dans la console Tailscale | `tailscale logout` en fin de job (même en cas d'échec ou d'annulation). |
 
-  - **Secure by Default**: RDP access is restricted to your private Tailscale network (Tailnet), never exposed to the public internet.
-  - **On-Demand Access**: Trigger the workflow manually whenever you need interactive access.
-  - **Dynamic User Creation**: Automatically creates a dedicated RDP user with credentials you provide via GitHub Secrets.
-  - **Robust Configuration**: The workflow includes checks for credentials, sets up firewall rules, and verifies connectivity.
-  - **Long-Running Sessions**: The job is configured with a long timeout and a final step that keeps the runner alive so you can stay connected.
+## Installation
 
------
+1. Créez un **dépôt privé** et placez les fichiers ainsi :
+   ```
+   .github/workflows/rdp.yml
+   README.md
+   .gitignore
+   ```
+2. Créez une clé d'authentification Tailscale : <https://login.tailscale.com/admin/settings/keys>
+   - cochez **Reusable** ;
+   - cochez **Ephemeral** (la machine disparaît toute seule du Tailnet à la fin) ;
+   - copiez la clé `tskey-auth-...`.
+3. Dans le dépôt : **Settings > Secrets and variables > Actions > New repository secret** :
 
-## Prerequisites
+   | Secret | Contenu |
+   |---|---|
+   | `TAILSCALE_AUTH_KEY` | la clé `tskey-auth-...` |
+   | `RDP_USERNAME` | votre nom d'utilisateur (20 caractères max). Optionnel : `kipre10` par défaut |
+   | `RDP_PASSWORD` | un mot de passe fort (8 caractères min : majuscule, minuscule, chiffre) |
 
-Before you can use this workflow, you need the following:
+## Utilisation
 
-1.  A **GitHub Repository** where you will add this workflow file.
-2.  A **Tailscale Account**. You can sign up for a free personal account at [tailscale.com](https://tailscale.com/).
-3.  The **Tailscale Client** installed and running on your local machine (the one you'll be connecting *from*).
+1. Onglet **Actions** > **RDP Tailscale (stable)** > **Run workflow**.
+   - `nom_machine` : nom affiché dans Tailscale (défaut `gh-runner`).
+   - `duree_minutes` : durée de la session (défaut 345, maximum 350).
+2. Ouvrez l'exécution : l'adresse apparaît dans le résumé (**Summary**) et dans le journal de l'étape *Maintenir la session*.
+3. Sur votre PC, Tailscale doit être lancé et connecté au même Tailnet.
+4. Ouvrez *Connexion Bureau à distance*, saisissez l'IP `100.x.x.x` (ou simplement le nom `gh-runner`, grâce à MagicDNS), puis votre utilisateur et mot de passe.
+5. Pour arrêter : **Cancel workflow** dans GitHub (la machine est retirée du Tailnet automatiquement).
 
------
+## Limites à connaître
 
-## Setup Instructions
+- **6 heures maximum** par exécution : c'est une limite de GitHub, impossible à dépasser. Relancez le workflow quand c'est fini.
+- Le runner est **éphémère** : tout ce qui est installé ou enregistré disparaît à la fin. Sauvegardez vos fichiers avant d'arrêter.
+- Les minutes Windows consomment votre quota Actions plus vite que Linux (multiplicateur x2 sur les dépôts privés). Vérifiez votre quota et les conditions d'utilisation de GitHub Actions.
 
-Follow these steps to configure the workflow in your repository.
+## Dépannage
 
-### Step 1: Fork This Repository by clicking [here](https://github.com/HARAJIT05/rdp/fork)
-
-### Step 2: Generate a Tailscale Auth Key
-
-An auth key allows the GitHub runner to join your private Tailnet without needing to log in interactively.
-
-1.  Go to your Tailscale Admin Console: [https://login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys)
-2.  Click **Generate auth key...**.
-3.  Click **Generate key and check on the reusable toggle**.
-4.  **Copy the key immediately**. You will not be able to see it again. It will look like `tskey-auth-k...`.
-
-### Step 3: Configure GitHub Secrets
-
-You must store sensitive information like passwords and auth keys as encrypted secrets in your repository.
-
-1.  In your GitHub repository, go to **Settings** \> **Secrets and variables** \> **Actions**.
-
-2.  Click **New repository secret** for each of the following secrets:
-
-      * `TAILSCALE_AUTH_KEY`: Paste the Tailscale auth key you generated in the previous step.
-      * `RDP_USERNAME`: Choose a username for the RDP account (e.g., `admin`, `dev`, `runner`).
-      * `RDP_PASSWORD`: Create a **strong password** for the RDP account. Windows runners have password complexity requirements, so use a password with at least 8 characters, including uppercase letters, lowercase letters, and numbers.
-
------
-
-## How to Use
-
-### Step 1: Run the Workflow
-
-Because this workflow is triggered by `workflow_dispatch`, you must start it manually.
-
-1.  Go to the **Actions** tab in your GitHub repository.
-2.  In the left sidebar, click on the **RDP** workflow.
-3.  You will see a message: "This workflow has a `workflow_dispatch` event trigger." Click the **Run workflow** button.
-4.  Keep the default branch selected and click the green **Run workflow** button again.
-
-### Step 2: Get Connection Details
-
-1.  Click on the newly started workflow run. You will see the `secure-rdp` job running.
-
-2.  Click on the `secure-rdp` job to view the live logs.
-
-3.  Wait for the job to run through the setup steps. The final step, **Maintain Connection**, will print the necessary credentials.
-
-4.  Look for the following output in the logs:
-
-    ```
-    === RDP ACCESS ===
-    Address: 100.XX.XX.XX
-    ==================
-    ```
-
-      * **Address**: This is the Tailscale IP address of the GitHub runner.
-      * **Username**: The username you set in the `RDP_USERNAME` secret.
-      * **Password**: The password you set in the `RDP_PASSWORD` secret (it will be masked as `***` in the logs for security, but the workflow uses the real value).
-
-### Step 3: Connect via RDP
-
-1.  Ensure the **Tailscale client is running** and you are logged in on your local machine.
-2.  Open your preferred RDP client (e.g., "Remote Desktop Connection" on Windows or "Microsoft Remote Desktop" on macOS).
-3.  In the "Computer" or "PC name" field, enter the **Tailscale IP Address** from the logs.
-4.  When prompted, enter the **Username** and **Password** you configured in the GitHub secrets.
-5.  Connect\! You should now have a full desktop session on the GitHub Actions runner.
-
-### Step 4: Terminate the Session
-
-The runner will stay online for up to 6 hours (the `timeout-minutes` value). When you are finished with your session:
-
-  - Go back to the GitHub Actions workflow run page and click **Cancel workflow**. This is important as it stops the runner and prevents you from using up your free Actions minutes.
-
------
-### Feel free to star this repository ⭐
+| Symptôme | Piste |
+|---|---|
+| « Secret ... manquant » | Vérifiez le nom exact des 3 secrets. |
+| Connexion RDP impossible | Tailscale est-il connecté sur votre PC ? Utilisez bien l'IP `100.x.x.x` affichée. |
+| Identifiants refusés | Mot de passe trop simple ou mal copié ; relancez après avoir corrigé le secret. |
+| La machine n'apparaît pas dans Tailscale | Clé expirée ou révoquée : régénérez-la. |
+| Session coupée au bout de ~6 h | Normal : limite GitHub. Relancez le workflow. |
